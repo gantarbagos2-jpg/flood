@@ -309,8 +309,8 @@ app.post('/api/flood/start',async(req,res)=>{
  if(!ready.length)return res.status(409).json({ok:false,error:'Tidak ada WebSocket yang sudah login dan siap'});
  const permitted=ready.filter(a=>Array.isArray(a.permissions)&&a.permissions.includes('messaging.send')&&a.permissions.includes('rooms.join')&&a.permissions.includes('rooms.leave'));
  if(!permitted.length)return res.status(403).json({ok:false,error:'Tidak ada WebSocket dengan izin rooms.join, rooms.leave, dan messaging.send'});
- Object.assign(floodState,{running:true,stop:false,room,delay,delaySocket,messages,joined:[],sent:0,failed:0,message:`Menyiapkan ${permitted.length} WebSocket untuk pengujian pesan acak.`,task:null});
- res.json({ok:true,message:`Pengujian dimulai: setiap WebSocket memilih satu dari 8 teks secara acak dan mengirim sekali; jeda antar-WS ${delaySocket} ms.`});
+ Object.assign(floodState,{running:true,stop:false,room,delay,delaySocket,messages,joined:[],sent:0,failed:0,message:`Menyiapkan ${permitted.length} WebSocket untuk FLOOD.`,task:null});
+ res.json({ok:true,message:`Dimulai: urutan 8 teks Flood diacak pada setiap putaran; jeda antar-WS ${delaySocket} ms dan jeda antar-teks ${delay} ms. Berjalan sampai STOP FLOOD.`});
  floodState.task=(async()=>{
   try{
    const joined=await Promise.all(permitted.map(async a=>{
@@ -320,28 +320,40 @@ app.post('/api/flood/start',async(req,res)=>{
    }));
    const active=joined.filter(Boolean);
    if(!active.length){floodState.message='Tidak ada WebSocket yang berhasil masuk room.';return}
-   floodState.message=`${active.length} WebSocket masuk room; pengiriman satu pesan acak per WebSocket dimulai.`;
-   // Uji terkendali: tiap WS memilih satu teks secara independen dan mengirim sekali.
-   // Tidak ada loop tanpa batas; tekan FLOOD lagi untuk menjalankan pengujian baru.
-   for(let wsIndex=0;wsIndex<active.length&&!floodState.stop;wsIndex++){
-    const a=active[wsIndex];
-    if(a.status!=='ready'||a.ws?.readyState!==WebSocket.OPEN){
-     floodState.failed++;
-     floodState.message=`WS ${wsIndex+1}/${active.length} tidak siap; dilewati.`;
-     continue;
-    }
-    const mi=Math.floor(Math.random()*messages.length);
-    try{
-     a.ws.send(JSON.stringify({type:'room.send_message',room,message:messages[mi]}));
-     floodState.sent++;
-     floodState.message=`Pengujian berjalan · WS ${wsIndex+1}/${active.length} memilih teks Flood ${mi+1}/8 · terkirim ${floodState.sent} · gagal ${floodState.failed}`;
-    }catch(e){
-     floodState.failed++;
-     floodState.message=`WS ${wsIndex+1}/${active.length} gagal mengirim: ${safe(e.message)}`;
-    }
-    if(!floodState.stop&&wsIndex<active.length-1&&delaySocket>0){
-     let remaining=delaySocket;
-     while(remaining>0&&!floodState.stop){const slice=Math.min(100,remaining);await wait(slice);remaining-=slice;}
+   floodState.message=`${active.length} WebSocket masuk room; pengiriman dengan urutan teks acak dimulai.`;
+   // Setiap WS mendapat urutan acak independen; semua 8 teks dikirim sekali per putaran.
+   // Delay Flood tetap berlaku antar-posisi, dan Delay Socket tetap berlaku antar-WS.
+   let cycles=0;
+   while(!floodState.stop){
+    cycles++;
+    const orders=active.map(()=>{
+     const order=messages.map((_,i)=>i);
+     for(let i=order.length-1;i>0;i--){
+      const j=Math.floor(Math.random()*(i+1));
+      [order[i],order[j]]=[order[j],order[i]];
+     }
+     return order;
+    });
+    for(let pos=0;pos<messages.length&&!floodState.stop;pos++){
+     for(let wsIndex=0;wsIndex<active.length&&!floodState.stop;wsIndex++){
+      const a=active[wsIndex];
+      const mi=orders[wsIndex][pos];
+      if(a.status!=='ready'||a.ws?.readyState!==WebSocket.OPEN){floodState.failed++;continue;}
+      try{a.ws.send(JSON.stringify({type:'room.send_message',room,message:messages[mi]}));floodState.sent++;}
+      catch{floodState.failed++;continue;}
+      floodState.message=`FLOOD berjalan · teks Flood ${mi+1}/8 · WS ${wsIndex+1}/${active.length} · putaran ${cycles} · terkirim ${floodState.sent} · gagal ${floodState.failed}`;
+      // Delay Socket tetap di antara WS, bukan setelah WS terakhir.
+      if(!floodState.stop&&wsIndex<active.length-1&&delaySocket>0){
+       let remaining=delaySocket;
+       while(remaining>0&&!floodState.stop){const slice=Math.min(100,remaining);await wait(slice);remaining-=slice;}
+      }
+     }
+     // Delay Flood tetap berlaku sebelum posisi teks berikutnya.
+     if(!floodState.stop&&pos<messages.length-1&&delay>0){
+      floodState.message=`Posisi ${pos+1}/8 selesai pada semua WS; menunggu Delay Flood ${delay} ms.`;
+      let remaining=delay;
+      while(remaining>0&&!floodState.stop){const slice=Math.min(100,remaining);await wait(slice);remaining-=slice;}
+     }
     }
    }
   }catch(e){floodState.message='FLOOD error: '+safe(e.message)}
@@ -352,7 +364,7 @@ app.post('/api/flood/start',async(req,res)=>{
     try{if(a.status==='ready'&&a.ws?.readyState===WebSocket.OPEN)await sendAndWait(a,{type:'room.leave',room},'room.leave.result',5000)}catch{floodState.failed++}
    }));
    floodState.joined=[];floodState.running=false;floodState.stop=false;floodState.task=null;
-   floodState.message=`Selesai: pengujian satu pesan per WebSocket berakhir dan room ditinggalkan. Terkirim ${floodState.sent}, gagal ${floodState.failed}.`;
+   floodState.message=`Selesai: pengiriman dihentikan dan room ditinggalkan. Terkirim ${floodState.sent}, gagal ${floodState.failed}.`;
   }
  })();
 });
